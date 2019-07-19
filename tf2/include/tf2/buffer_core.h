@@ -412,6 +412,9 @@ private:
   bool warnFrameId(const char* function_name_arg, const std::string& frame_id) const;
   CompactFrameID validateFrameId(const char* function_name_arg, const std::string& frame_id) const;
 
+  tf2::Maybe<TimePoint> lookupFrameNumber2(const std::string & frameid_str) const;
+  TimePoint lookupOrInsertFrameNumber2(const std::string & frameid_str) const;
+
   /// String to number for frame lookup with dynamic allocation of new frames
   CompactFrameID lookupFrameNumber(const std::string& frameid_str) const;
 
@@ -423,9 +426,16 @@ private:
 
   void createConnectivityErrorString(CompactFrameID source_frame, CompactFrameID target_frame, std::string* out) const;
 
+
+  tf2::Maybe<TimePoint> getLatestCommonTime(CompactFrameID target_frame, CompactFrameID source_frame) const;
+
   /**@brief Return the latest rostime which is common across the spanning set
    * zero if fails to cross */
   tf2::TF2Error getLatestCommonTime(CompactFrameID target_frame, CompactFrameID source_frame, TimePoint& time, std::string* error_string) const;
+
+  template <typename F>
+  tf2::Maybe<std::vector<CompactFrameID>> walkToTopParent(
+    F & f, TimePoint time, CompactFrameID target_id, CompactFrameID source_id) const;
 
   template<typename F>
   tf2::TF2Error walkToTopParent(F& f, TimePoint time, CompactFrameID target_id, CompactFrameID source_id, std::string* error_string) const;

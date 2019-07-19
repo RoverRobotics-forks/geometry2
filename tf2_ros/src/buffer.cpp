@@ -156,7 +156,9 @@ Buffer::canTransform(const std::string& target_frame, const std::string& source_
       // TODO(sloretz) sleep using clock_->sleep_for when implemented
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+
   bool retval = canTransform(target_frame, source_frame, time, errstr);
+
   rclcpp::Time current_time = clock_->now();
   conditionally_append_timeout_info(errstr, start_time, current_time, rclcpp_timeout);
   return retval;

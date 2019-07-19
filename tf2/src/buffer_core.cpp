@@ -319,11 +319,82 @@ enum WalkEnding
   FullPath,
 };
 
-// TODO for Jade: Merge walkToTopParent functions; this is now a stub to preserve ABI
+template <typename F>
+tf2::Maybe<std::vector<CompactFrameID>> BufferCore::walkToTopParent(
+  F & f, TimePoint time, CompactFrameID target_id, CompactFrameID source_id) const {
+  if (source_id == target_id)
+  {
+    f.finalize(Identity, time);
+    return Maybe<std::vector<CompactFrameID>>({target_id});
+  }
+
+  //If getting the latest get the latest common time
+  if (time == TimePointZero)
+  {
+    auto retval = getLatestCommonTime(target_id, source_id, time);
+    if (retval != tf2::TF2Error::NO_ERROR)
+    {
+      return retval;
+    }
+  }
+  std::vector<CompactFrameID> frame_chain;
+
+  // Walk the tree to its root from the source frame, accumulating the transform
+  CompactFrameID frame = source_id;
+  // we use this for loop detection
+  CompactFrameID min_visited = source_id;
+
+  uint32_t depth = 0;
+
+  std::string extrapolation_error_string;
+
+  while (frame != 0)
+  {
+    TimeCacheInterfacePtr cache = getFrame(frame);
+    frame_chain.push_back(frame);
+
+    min_visited = std::min(min_visited, frame);
+    if (!cache)
+    {
+      // There will be no cache for the very root of the tree
+      break;
+    }
+
+    CompactFrameID parent = f.gather(cache, time, &extrapolation_error_string);
+    if (parent == 0)
+    {
+      // Just break out here... there may still be a path from source -> target
+      break;
+    }
+
+    // Early out... target frame is a direct parent of the source frame
+    if (frame == target_id)
+    {
+      f.finalize(TargetParentOfSource, time);
+      return Maybe<std::vector<CompactFrameID>>(std::move(frame_chain));
+    }
+
+    f.accum(true);
+    frame = parent;
+
+    if (frame == min_visited && frame_chain.size()>1)
+    {
+      std::vector<std::string> frame_names;
+      size_t i = 0;
+      for (i=0; frame_chain[i]!=min_visited; i++){};
+      for (; i<frame_chain.size();i++){
+        frame_names.push_back(lookupFrameString(i));
+      }
+      return Maybe<std::vector<CompactFrameID>>(LoopException(frame_names));
+    }
+    }
+}
+
 template<typename F>
 tf2::TF2Error BufferCore::walkToTopParent(F& f, TimePoint time, CompactFrameID target_id, CompactFrameID source_id, std::string* error_string) const
 {
-  return walkToTopParent(f, time, target_id, source_id, error_string, NULL);
+  auto result = walkToTopParent(f, time, target_id, source_id);
+  return result.to_enum();
 }
 
 template<typename F>
@@ -331,6 +402,7 @@ tf2::TF2Error BufferCore::walkToTopParent(F& f, TimePoint time, CompactFrameID t
     CompactFrameID source_id, std::string* error_string, std::vector<CompactFrameID>
     *frame_chain) const
 {
+
   if (frame_chain)
     frame_chain->clear();
 
@@ -720,15 +792,15 @@ void BufferCore::lookupTransformImpl(const std::string& target_frame,
 
 
 /*
-geometry_msgs::Twist BufferCore::lookupTwist(const std::string& tracking_frame, 
-                                          const std::string& observation_frame, 
-                                          const tf2::TimePoint& time, 
+geometry_msgs::Twist BufferCore::lookupTwist(const std::string& tracking_frame,
+                                          const std::string& observation_frame,
+                                          const tf2::TimePoint& time,
                                           const tf2::Duration& averaging_interval) const
 {
   try
   {
   geometry_msgs::Twist t;
-  old_tf_.lookupTwist(tracking_frame, observation_frame, 
+  old_tf_.lookupTwist(tracking_frame, observation_frame,
                       time, averaging_interval, t);
   return t;
   }
@@ -750,12 +822,12 @@ geometry_msgs::Twist BufferCore::lookupTwist(const std::string& tracking_frame,
   }
 }
 
-geometry_msgs::Twist BufferCore::lookupTwist(const std::string& tracking_frame, 
-                                          const std::string& observation_frame, 
+geometry_msgs::Twist BufferCore::lookupTwist(const std::string& tracking_frame,
+                                          const std::string& observation_frame,
                                           const std::string& reference_frame,
-                                          const tf2::Point & reference_point, 
-                                          const std::string& reference_point_frame, 
-                                          const tf2::TimePoint& time, 
+                                          const tf2::Point & reference_point,
+                                          const std::string& reference_point_frame,
+                                          const tf2::TimePoint& time,
                                           const tf2::Duration& averaging_interval) const
 {
   try{
@@ -875,6 +947,20 @@ tf2::TimeCacheInterfacePtr BufferCore::getFrame(CompactFrameID frame_id) const
   }
 }
 
+Maybe<CompactFrameID> BufferCore::lookupFrameNumber2(const std::string& frameid_str) const
+{
+  CompactFrameID retval;
+
+  M_StringToCompactFrameID::const_iterator map_it = frameIDs_.find(frameid_str);
+  if (map_it == frameIDs_.end())
+  {
+    return {LookupException(frameid_str)};
+  }
+  else {
+    return {map_it->second};
+  }
+}
+
 CompactFrameID BufferCore::lookupFrameNumber(const std::string& frameid_str) const
 {
   CompactFrameID retval;
@@ -980,6 +1066,175 @@ struct TimeAndFrameIDFrameComparator
   }
 
   CompactFrameID id;
+};
+
+tf2::Maybe<TimePoint> BufferCore::getLatestCommonTime(CompactFrameID target_id, CompactFrameID source_id) const {
+  // Error if one of the frames don't exist.
+  if (source_id == 0 || target_id == 0)
+    return Maybe<TimePoint>(tf2::LookupException("<unknown frame>"));
+
+  if (source_id == target_id)
+  {
+    TimeCacheInterfacePtr cache = getFrame(source_id);
+    //Set time to latest timestamp of frameid in case of target and source frame id are the same
+    if (cache)
+      return Maybe<TimePoint>(cache->getLatestTimestamp());
+    else
+     return Maybe<TimePoint>(TimePointZero);
+  }
+
+  std::vector<P_TimeAndFrameID> lct_cache;
+
+  // Walk the tree to its root from the source frame, accumulating the list of parent/time as well as the latest time
+  // in the target is a direct parent
+  CompactFrameID frame = source_id;
+  P_TimeAndFrameID temp;
+  uint32_t depth = 0;
+  TimePoint common_time = TimePoint::max();
+  while (frame != 0)
+  {
+    TimeCacheInterfacePtr cache = getFrame(frame);
+
+    if (!cache)
+    {
+      // There will be no cache for the very root of the tree
+      break;
+    }
+
+    P_TimeAndFrameID latest = cache->getLatestTimeAndParent();
+
+    if (latest.second == 0)
+    {
+      // Just break out here... there may still be a path from source -> target
+      break;
+    }
+
+    if (latest.first != TimePointZero)
+    {
+      common_time = std::min(latest.first, common_time);
+    }
+
+    lct_cache.push_back(latest);
+
+    frame = latest.second;
+
+    // Early out... target frame is a direct parent of the source frame
+    if (frame == target_id)
+    {
+      if (common_time == TimePoint::max())
+      {
+        return Maybe<TimePoint>( TimePointZero);
+      }
+      else return Maybe<TimePoint>(common_time);
+    }
+
+    ++depth;
+    if (depth > MAX_GRAPH_DEPTH)
+    {
+      // todo:
+      return Maybe<TimePoint>(LoopException())
+      if (error_string)
+      {
+        std::stringstream ss;
+        ss<<"The tf tree is invalid because it contains a loop." << std::endl
+          << allFramesAsStringNoLock() << std::endl;
+        *error_string = ss.str();
+      }
+      return tf2::TF2Error::LOOKUP_ERROR;
+    }
+  }
+
+  // Now walk to the top parent from the target frame, accumulating the latest time and looking for a common parent
+  frame = target_id;
+  depth = 0;
+  common_time = TimePoint::max();
+  CompactFrameID common_parent = 0;
+  while (true)
+  {
+    TimeCacheInterfacePtr cache = getFrame(frame);
+
+    if (!cache)
+    {
+      break;
+    }
+
+    P_TimeAndFrameID latest = cache->getLatestTimeAndParent();
+
+    if (latest.second == 0)
+    {
+      break;
+    }
+
+    if (latest.first != TimePointZero)
+    {
+      common_time = std::min(latest.first, common_time);
+    }
+
+    std::vector<P_TimeAndFrameID>::iterator it = std::find_if(lct_cache.begin(), lct_cache.end(), TimeAndFrameIDFrameComparator(latest.second));
+    if (it != lct_cache.end()) // found a common parent
+    {
+      common_parent = it->second;
+      break;
+    }
+
+    frame = latest.second;
+
+    // Early out... source frame is a direct parent of the target frame
+    if (frame == source_id)
+    {
+      time = common_time;
+      if (time == TimePoint::max())
+      {
+        time = TimePointZero;
+      }
+      return tf2::TF2Error::NO_ERROR;
+    }
+
+    ++depth;
+    if (depth > MAX_GRAPH_DEPTH)
+    {
+      if (error_string)
+      {
+        std::stringstream ss;
+        ss<<"The tf tree is invalid because it contains a loop." << std::endl
+          << allFramesAsStringNoLock() << std::endl;
+        *error_string = ss.str();
+      }
+      return tf2::TF2Error::LOOKUP_ERROR;
+    }
+  }
+
+  if (common_parent == 0)
+  {
+    createConnectivityErrorString(source_id, target_id, error_string);
+    return tf2::TF2Error::CONNECTIVITY_ERROR;
+  }
+
+  // Loop through the source -> root list until we hit the common parent
+  {
+    std::vector<P_TimeAndFrameID>::iterator it = lct_cache.begin();
+    std::vector<P_TimeAndFrameID>::iterator end = lct_cache.end();
+    for (; it != end; ++it)
+    {
+      if (it->first != TimePointZero)
+      {
+        common_time = std::min(common_time, it->first);
+      }
+
+      if (it->second == common_parent)
+      {
+        break;
+      }
+    }
+  }
+
+  if (common_time == TimePoint::max())
+  {
+    common_time = TimePointZero;
+  }
+
+  time = common_time;
+  return tf2::TF2Error::NO_ERROR;
 };
 
 tf2::TF2Error BufferCore::getLatestCommonTime(CompactFrameID target_id, CompactFrameID source_id, TimePoint & time, std::string * error_string) const

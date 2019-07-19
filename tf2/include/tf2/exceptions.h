@@ -36,7 +36,9 @@
 #include <cstdint>
 
 #include <tf2/visibility_control.h>
-
+#include <sstream>
+#include <vector>
+#include <stdexcept>
 namespace tf2{
 
 enum class TF2Error : std::uint8_t {
@@ -46,9 +48,9 @@ enum class TF2Error : std::uint8_t {
   EXTRAPOLATION_ERROR = 3,
   INVALID_ARGUMENT_ERROR = 4,
   TIMEOUT_ERROR = 5,
-  TRANSFORM_ERROR = 6
+  TRANSFORM_ERROR = 6,
+  LOOP_ERROR = 7,
 };
-
 
 /** \brief A base class for all tf2 exceptions 
  * This inherits from ros::exception 
@@ -58,20 +60,82 @@ class TransformException: public std::runtime_error
 { 
 public:
   TF2_PUBLIC
-  TransformException(const std::string errorDescription) : std::runtime_error(errorDescription) { ; };
+  explicit TransformException(const std::string errorDescription) : std::runtime_error(errorDescription) { ; };
+
+  TF2_PUBLIC
+  virtual TF2Error to_enum() {
+     return TF2Error ::TRANSFORM_ERROR;
+  };
 };
 
+template <typename T>
+class Maybe
+{
+  std::unique_ptr<T> result;
+  std::unique_ptr<TransformException> exception;
+public:
+  TF2_PUBLIC
+  T get(){
+    auto exc = exception.get();
+    if (exception)
+      throw exc;
+  }
+  TF2_PUBLIC
+  bool is_success(){
+    return bool(result);
+  }
+
+  TF2Error to_enum(){
+    return is_success() ? TF2Error::NO_ERROR : exception->to_enum();
+  }
+
+  TF2_PUBLIC
+  explicit Maybe(T && value): result(std::make_unique<T>(value)),exception(nullptr) {}
+
+  TF2_PUBLIC
+  explicit Maybe(TransformException &&e): result(nullptr), exception(std::make_unique<Maybe>(e)) {}
+};
 
   /** \brief An exception class to notify of no connection
    * 
    * This is an exception class to be thrown in the case 
    * that the Reference Frame tree is not connected between
    * the frames requested. */
-class ConnectivityException:public TransformException
-{ 
+class ConnectivityException: public TransformException
+{
 public:
+  static std::string make_error_string (
+    std::string &target_frame,
+    std::vector<std::string> &target_frame_parents,
+    std::string &source_frame,
+    std::vector<std::string> &source_frame_parents){
+    std::stringstream ss;
+    ss << "Could not find a connection between '"<<target_frame<<"' and '"<<
+          source_frame<<"' because they are not part of the same tree. ";
+
+    ss << "Path to target frame root: '" << target_frame << "'";
+    for (auto &frame: target_frame_parents)
+      ss << ", '"<<frame<<"'";
+
+    ss << "; Path to source frame root: '" << source_frame << "'";
+    for (auto &frame : source_frame_parents)
+      ss << ", '"<<frame<<"'";
+  }
+
   TF2_PUBLIC
-  ConnectivityException(const std::string errorDescription) : tf2::TransformException(errorDescription) { ; };
+  ConnectivityException(
+    std::string &target_frame,
+    std::vector<std::string> &target_frame_parents,
+    std::string &source_frame,
+    std::vector<std::string> &source_frame_parents)
+  :  TransformException(
+    make_error_string(target_frame,target_frame_parents,source_frame,source_frame_parents)
+    ) {}
+
+  TF2_PUBLIC
+  TF2Error to_enum() override {
+    return TF2Error::CONNECTIVITY_ERROR;
+  };
 };
 
 
@@ -87,7 +151,10 @@ class LookupException: public TransformException
 { 
 public:
   TF2_PUBLIC
-  LookupException(const std::string errorDescription) : tf2::TransformException(errorDescription) { ; };
+  explicit LookupException(const std::string frame) : tf2::TransformException("Frame does not exist: " + frame) {  };
+
+  TF2_PUBLIC
+  LookupException(const std::string frame, const std::string frame2) : tf2::TransformException("Frames do not exist: "+frame + ", "+ frame) { };
 };
 
   /** \brief An exception class to notify that the requested value would have required extrapolation beyond current limits.
@@ -97,7 +164,12 @@ class ExtrapolationException: public TransformException
 { 
 public:
   TF2_PUBLIC
-  ExtrapolationException(const std::string errorDescription) : tf2::TransformException(errorDescription) { ; };
+  explicit ExtrapolationException(const std::string errorDescription) : tf2::TransformException(errorDescription) { ; };
+
+  TF2_PUBLIC
+  TF2Error to_enum() override {
+    return TF2Error::EXTRAPOLATION_ERROR;
+  };
 };
 
 /** \brief An exception class to notify that one of the arguments is invalid
@@ -109,7 +181,12 @@ class InvalidArgumentException: public TransformException
 { 
 public:
   TF2_PUBLIC
-  InvalidArgumentException(const std::string errorDescription) : tf2::TransformException(errorDescription) { ; };
+  explicit InvalidArgumentException(const std::string errorDescription) : tf2::TransformException(errorDescription) { ; };
+
+  TF2_PUBLIC
+  TF2Error to_enum() override {
+    return TF2Error::INVALID_ARGUMENT_ERROR;
+  };
 };
 
 /** \brief An exception class to notify that a timeout has occured
@@ -120,7 +197,38 @@ class TimeoutException: public TransformException
 { 
 public:
   TF2_PUBLIC
-  TimeoutException(const std::string errorDescription) : tf2::TransformException(errorDescription) { ; };
+  explicit TimeoutException(const std::string errorDescription) : tf2::TransformException(errorDescription) { ; };
+
+  TF2_PUBLIC
+  TF2Error to_enum() override {
+    return TF2Error::TIMEOUT_ERROR;
+  };
+};
+
+class LoopException: public TransformException {
+  static std::string describe (std::vector<std::string> &nodes) {
+    std::stringstream ss;
+    ss << "Transform tree contains a loop: ";
+    bool first = true;
+    for (auto & n: nodes) {
+      if (first){
+        first = false;
+      }
+      else {
+        ss << ", ";
+      }
+      ss << "'" << n << "'";
+    }
+  }
+public:
+  TF2_PUBLIC
+  explicit LoopException(std::vector<std::string> &nodes): tf2::TransformException(describe(nodes)){};
+
+  TF2_PUBLIC
+  TF2Error to_enum() override {
+    return TF2Error::LOOP_ERROR;
+  };
+
 };
 
 
