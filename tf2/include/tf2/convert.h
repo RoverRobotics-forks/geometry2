@@ -68,8 +68,6 @@ template <class T>
 template <class T>
   std::string getFrameId(const T& t);
 
-
-
 /* An implementation for Stamped<P> datatypes */
 template <class P>
   tf2::TimePoint getTimestamp(const tf2::Stamped<P>& t)

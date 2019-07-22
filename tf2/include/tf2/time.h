@@ -44,7 +44,6 @@ namespace tf2
   using Duration = std::chrono::nanoseconds;
   using TimePoint = std::chrono::time_point<std::chrono::system_clock, Duration>;
 
-
   using IDuration = std::chrono::duration<int, std::nano>;
   // This is the zero time in ROS
   static const TimePoint TimePointZero = TimePoint(IDuration::zero());

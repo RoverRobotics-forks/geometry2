@@ -35,35 +35,17 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Vector3.h>
 
+#include "exceptions.h"
 #include <tf2/visibility_control.h>
-#include "tf2/time.h"
 
 namespace tf2
 {
-typedef uint32_t CompactFrameID;
+typedef size_t CompactFrameID;
 
-/** \brief Storage for transforms and their parent */
-class TransformStorage
-{
-public:
-  TF2_PUBLIC
-  TransformStorage();
-  TF2_PUBLIC
-  TransformStorage(
-    const TimePoint & stamp, const Quaternion & q, const Vector3 & t, CompactFrameID frame_id,
-    CompactFrameID child_frame_id);
-
-  TF2_PUBLIC
-  TransformStorage(const TransformStorage & rhs) { *this = rhs; }
-
-  TF2_PUBLIC
-  TransformStorage & operator=(const TransformStorage & rhs) = default;
-
-  tf2::Quaternion rotation_;
-  tf2::Vector3 translation_;
-  TimePoint stamp_;
-  CompactFrameID frame_id_;
-  CompactFrameID child_frame_id_;
+struct RelTransform{
+  tf2::Maybe<RelTransform> parent;
+   Quaternion rotation;
+   Vector3 translation;
 };
 
 }  // namespace tf2

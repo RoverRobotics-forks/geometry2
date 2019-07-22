@@ -16,7 +16,7 @@ include_directories(include src/bt ${geometry_msgs_INCLUDE_DIRS} ${console_bridg
 # export user definitions
 
 #CPP Libraries
-add_library(tf2 SHARED src/cache.cpp src/buffer_core.cpp src/static_cache.cpp src/time.cpp)
+add_library(tf2 SHARED src/time_cache.cpp src/buffer_core.cpp src/static_cache.cpp src/time.cpp include/tf2/time_cache_interface.h src/util.cpp)
 target_link_libraries(tf2 ${geometry_msgs_LIBRARIES} ${console_bridge_LIBRARIES})
 # Causes the visibility macros to use dllexport rather than dllimport,
 # which is appropriate when building the dll but not consuming it.

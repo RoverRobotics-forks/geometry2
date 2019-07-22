@@ -50,6 +50,7 @@ enum class TF2Error : std::uint8_t {
   TIMEOUT_ERROR = 5,
   TRANSFORM_ERROR = 6,
   LOOP_ERROR = 7,
+  NO_PARENT = 8,
 };
 
 /** \brief A base class for all tf2 exceptions 
@@ -69,32 +70,47 @@ public:
 };
 
 template <typename T>
-class Maybe
-{
-  std::unique_ptr<T> result;
-  std::unique_ptr<TransformException> exception;
+class Maybe final {
+  bool is_result;
+  union {
+    const T result;
+    const std::shared_ptr<TransformException> exception;
+  } content;
+
+  Maybe(bool is_result, decltype(content) content): is_result(is_result),content(content){}
+
 public:
-  TF2_PUBLIC
-  T get(){
-    auto exc = exception.get();
-    if (exception)
-      throw exc;
+  auto operator *(){
+    return get();
   }
-  TF2_PUBLIC
-  bool is_success(){
-    return bool(result);
+  auto get() {
+    if (!is_result)
+      return content.result;
+    else
+      throw *(content.exception);
+  }
+  auto is_success() {return !bool(is_result);}
+  std::reference_wrapper<TransformException> exc_ref(){
+    assert (exception);
+    return content.exception.get();
+  };
+  std::shared_ptr<TransformException> get_exception(){return exception;}
+
+  template<typename... Args>
+  static Maybe success(Args&&... args) {
+    return Maybe(true, std::forward<Args>(args)...);
   }
 
-  TF2Error to_enum(){
-    return is_success() ? TF2Error::NO_ERROR : exception->to_enum();
+  template<typename Exc, typename... Args>
+  static Maybe failure(Args&&... args) {
+    return Maybe(false, std::make_shared<Exc>(std::forward<Args>(args)...));
   }
 
-  TF2_PUBLIC
-  explicit Maybe(T && value): result(std::make_unique<T>(value)),exception(nullptr) {}
-
-  TF2_PUBLIC
-  explicit Maybe(TransformException &&e): result(nullptr), exception(std::make_unique<Maybe>(e)) {}
+  template<typename E, typename... Args>
+  explicit Maybe (Args&&... args):result(nullptr), exception(new E(std::forward<Args>(args)...)){};
 };
+
+
 
   /** \brief An exception class to notify of no connection
    * 
@@ -113,11 +129,11 @@ public:
     ss << "Could not find a connection between '"<<target_frame<<"' and '"<<
           source_frame<<"' because they are not part of the same tree. ";
 
-    ss << "Path to target frame root: '" << target_frame << "'";
+    ss << "Path up from target frame: '" << target_frame << "'";
     for (auto &frame: target_frame_parents)
       ss << ", '"<<frame<<"'";
 
-    ss << "; Path to source frame root: '" << source_frame << "'";
+    ss << "; Path up from source frame: '" << source_frame << "'";
     for (auto &frame : source_frame_parents)
       ss << ", '"<<frame<<"'";
   }
@@ -189,7 +205,22 @@ public:
   };
 };
 
-/** \brief An exception class to notify that a timeout has occured
+class NoParentException: public TransformException
+{
+  std::string describe(std::string child){
+    return "The frame "+child+" does not have a parent";
+  }
+public:
+  TF2_PUBLIC
+  explicit NoParentException(const std::string child) : tf2::TransformException(describe(child)) {  };
+
+  TF2_PUBLIC
+  TF2Error to_enum() override {
+    return TF2Error::NO_PARENT;
+  };
+};
+
+/** \brief An exception class to notify that a timeout has occurred
  * 
  * 
  */

@@ -41,12 +41,14 @@
 
 //#include "geometry_msgs/TwistStamped.h"
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "time_cache.h"
+#include "tf2/time_cache_interface.h"
 
-#include <map>
-#include <unordered_map>
-#include <mutex>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 
 #include <tf2/exceptions.h>
 #include <tf2/buffer_core_interface.h>
@@ -59,8 +61,6 @@ typedef std::pair<TimePoint, CompactFrameID> P_TimeAndFrameID;
 typedef uint32_t TransformableCallbackHandle;
 typedef uint64_t TransformableRequestHandle;
 
-class TimeCacheInterface;
-using TimeCacheInterfacePtr = std::shared_ptr<TimeCacheInterface>;
 
 enum TransformableResult
 {
@@ -68,8 +68,87 @@ enum TransformableResult
   TransformFailure,
 };
 
-
 static constexpr Duration BUFFER_CORE_DEFAULT_CACHE_TIME = std::chrono::seconds(10);  //!< The default amount of time to cache data in seconds
+
+class BufferCoreIterator {
+  std::shared_ptr<BufferCoreInterface> buffer;
+  TimePoint time;
+  CompactFrameID frame_id;
+
+  Maybe<TransformData> try_get(){
+    if (frame_id == 0)
+      throw NoParentException(buffer.reverse_lookup(frame_id));
+    auto cache = buffer->getFrame(frame_id);
+
+    return cache.getData(time);
+  }
+
+  Maybe<BufferCoreIterator> up(){
+    return {buffer,time,get_parent()};
+  }
+
+  RelTransform operator *(){
+    return try_get().get();
+  }
+
+  Maybe<RelTransform> get_parent() {
+    return {operator*().parent;};
+  };
+};
+
+std::pair<std::vector<RelTransform>, std::shared_ptr<TransformException>> walk_to_root(BufferCoreIterator it) {
+  std::vector<RelTransform> result;
+  std::ordered_set visited;
+  TransformException done_reason;
+  try {
+    while (true){
+      if (!visited.insert(it.get_frame()).second)){
+        return {result,LoopException()};
+      }
+      it = *(it.get_parent());
+    }
+  } except (TransformException &e){
+    return {result, std::make_shared<TransformException>(e)};
+  }
+}
+
+/// walk up the tree until we meet a common frame
+Maybe<CompactFrameID> find_common_root(BufferCoreIterator it_target, BufferCoreIterator it_source)
+{
+  std::unordered_set<CompactFrameID> visited_target;
+  std::shared_ptr<TransformException> target_chain_end;
+
+  std::unordered_set<CompactFrameID> visited_source;
+  std::shared_ptr<TransformException> source_chain_end;
+
+  while (true) {
+    if (!target_chain_end) {
+      if (!visited_target.insert(it_target.frame_id)) {
+        target_chain_end = std::make_shared<LoopException>();
+      }
+      if (visited_source.count(it_target.frame_id)) {
+        return {it_target.frame_id};
+      }
+    }
+    if (!source_chain_end) {
+      if (!visited_source.insert(it_source.frame_id)) {
+        source_chain_end = std::make_shared<LoopException>();
+      }
+      source_chain.push_back(*it_target);
+      if (visited_target.count(it_source.frame_id)) {
+        return { it_source.frame_id};
+      }
+    }
+    if (target_chain_end && source_chain_end) {
+      return {ConnectivityException};
+    }
+  }
+}
+
+tf2::Transform compute_transform (BufferCoreIterator it_target, BufferCoreIterator it_source, CompactFrameID common_root) {
+  auto transform = Identity ();
+
+}
 
 /** \brief A Class which provides coordinate transforms between any two frames in a system.
  *
@@ -91,6 +170,9 @@ static constexpr Duration BUFFER_CORE_DEFAULT_CACHE_TIME = std::chrono::seconds(
  */
 class BufferCore : public BufferCoreInterface
 {
+  TF2_PUBLIC
+  virtual iterator getIteratorFromFrame(const std::string& a_frame, const tf2::TimePoint & time);
+
 public:
   /************* Constants ***********************/
   TF2_PUBLIC
@@ -273,21 +355,8 @@ public:
   
 
 
-
   /* Backwards compatability section for tf::Transformer you should not use these
    */
-
-  /**@brief Check if a frame exists in the tree
-   * @param frame_id_str The frame id in question  */
-  TF2_PUBLIC
-  bool _frameExists(const std::string& frame_id_str) const;
-
-  /**@brief Fill the parent of a frame.
-   * @param frame_id The frame id of the frame in question
-   * @param parent The reference to the string to fill the parent
-   * Returns true unless "NO_PARENT" */
-  TF2_PUBLIC
-  bool _getParent(const std::string& frame_id, TimePoint time, std::string& parent) const;
 
   /** \brief A way to get a std::vector of available frame ids */
   TF2_PUBLIC
@@ -295,12 +364,12 @@ public:
 
 
   TF2_PUBLIC
-  CompactFrameID _lookupFrameNumber(const std::string& frameid_str) const { 
-    return lookupFrameNumber(frameid_str); 
+  Maybe<CompactFrameID> _lookupFrameNumber(const std::string& frameid_str) const {
+    return lookupFrameNumber(frameid_str);
   }
   TF2_PUBLIC
   CompactFrameID _lookupOrInsertFrameNumber(const std::string& frameid_str) {
-    return lookupOrInsertFrameNumber(frameid_str); 
+    return lookupOrInsertFrameNumber(frameid_str);
   }
 
   TF2_PUBLIC
@@ -344,20 +413,17 @@ private:
   
   /** \brief The pointers to potential frames that the tree can be made of.
    * The frames will be dynamically allocated at run time when set the first time. */
-  typedef std::vector<TimeCacheInterfacePtr> V_TimeCacheInterface;
-  V_TimeCacheInterface frames_;
+  std::vector<TimeCacheInterface::Ptr> frames_;
   
   /** \brief A mutex to protect testing and allocating new frames on the above vector. */
   mutable std::mutex frame_mutex_;
 
   /** \brief A map from string frame ids to CompactFrameID */
-  typedef std::unordered_map<std::string, CompactFrameID> M_StringToCompactFrameID;
-  M_StringToCompactFrameID frameIDs_;
+  std::unordered_map<std::string, CompactFrameID> frameIDs_;
   /** \brief A map from CompactFrameID frame_id_numbers to string for debugging and output */
   std::vector<std::string> frameIDs_reverse;
   /** \brief A map to lookup the most recent authority for a given frame */
   std::map<CompactFrameID, std::string> frame_authority_;
-
 
   /// How long to cache transform history
   tf2::Duration cache_time_;
@@ -377,14 +443,12 @@ private:
     std::string target_string;
     std::string source_string;
   };
-  typedef std::vector<TransformableRequest> V_TransformableRequest;
-  V_TransformableRequest transformable_requests_;
+  std::vector<TransformableRequest> transformable_requests_;
   std::mutex transformable_requests_mutex_;
   uint64_t transformable_requests_counter_;
 
   struct RemoveRequestByCallback;
   struct RemoveRequestByID;
-
 
   /************************* Internal Functions ****************************/
 
@@ -404,10 +468,9 @@ private:
    * This is an internal function which will get the pointer to the frame associated with the frame id
    * Possible Exception: tf::LookupException
    */
-  TimeCacheInterfacePtr getFrame(CompactFrameID c_frame_id) const;
+  Maybe<TimeCacheInterface::Ptr> getFrame(CompactFrameID c_frame_id) const;
 
-  TimeCacheInterfacePtr allocateFrame(CompactFrameID cfid, bool is_static);
-
+  TimeCacheInterface::Ptr allocateFrame(CompactFrameID cfid, bool is_static);
 
   bool warnFrameId(const char* function_name_arg, const std::string& frame_id) const;
   CompactFrameID validateFrameId(const char* function_name_arg, const std::string& frame_id) const;
@@ -421,45 +484,29 @@ private:
   /// String to number for frame lookup with dynamic allocation of new frames
   CompactFrameID lookupOrInsertFrameNumber(const std::string& frameid_str);
 
-  ///Number to string frame lookup may throw LookupException if number invalid
+  /// Number to string frame lookup may throw LookupException if number invalid
   const std::string& lookupFrameString(CompactFrameID frame_id_num) const;
 
   void createConnectivityErrorString(CompactFrameID source_frame, CompactFrameID target_frame, std::string* out) const;
 
+  /**@brief Return the latest rostime which is common across the spanning set */
+  tf2::Maybe<TimePoint> getLatestCommonTime(CompactFrameID target_frame, CompactFrameID source_frame) const
 
-  tf2::Maybe<TimePoint> getLatestCommonTime(CompactFrameID target_frame, CompactFrameID source_frame) const;
+  /**@brief find the top ancestor of target_id. Returns the path, if it exists */
+  tf2::Maybe<std::vector<RelTransform>> walkToTopParent(CompactFrameID frame_id, TimePoint time) const;
 
-  /**@brief Return the latest rostime which is common across the spanning set
-   * zero if fails to cross */
-  tf2::TF2Error getLatestCommonTime(CompactFrameID target_frame, CompactFrameID source_frame, TimePoint& time, std::string* error_string) const;
-
-  template <typename F>
-  tf2::Maybe<std::vector<CompactFrameID>> walkToTopParent(
-    F & f, TimePoint time, CompactFrameID target_id, CompactFrameID source_id) const;
-
-  template<typename F>
-  tf2::TF2Error walkToTopParent(F& f, TimePoint time, CompactFrameID target_id, CompactFrameID source_id, std::string* error_string) const;
-
-  /**@brief Traverse the transform tree. If frame_chain is not NULL, store the traversed frame tree in vector frame_chain.
-   * */
-  template<typename F>
-  tf2::TF2Error walkToTopParent(F& f, TimePoint time, CompactFrameID target_id, CompactFrameID source_id, std::string* error_string, std::vector<CompactFrameID> *frame_chain) const;
+  /**@brief given a path up from target frame and a path up from source frame,
+   * Find the relative transform. */
+  tf2::Maybe<tf2::Transform> accumulate_transforms(std::vector<RelTransform> target_chain, std::vector<RelTransform> source_chain) const;
 
   void testTransformableRequests();
   bool canTransformInternal(CompactFrameID target_id, CompactFrameID source_id,
                     const TimePoint& time, std::string* error_msg) const;
-  bool canTransformNoLock(CompactFrameID target_id, CompactFrameID source_id,
-                      const TimePoint& time, std::string* error_msg) const;
-
+  bool canTransformNoLock(CompactFrameID target_id, CompactFrameID source_id, const TimePoint& time) const;
 
   //Whether it is safe to use canTransform with a timeout. (If another thread is not provided it will always timeout.)
   bool using_dedicated_thread_;
-
 };
-
-
-
-
 }
 
 #endif //TF2_CORE_H

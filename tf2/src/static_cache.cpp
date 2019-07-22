@@ -37,42 +37,14 @@
 
 using namespace tf2;
 
-bool StaticCache::getData(TimePoint time, TransformStorage & data_out, std::string* error_str) //returns false if data not available
+Maybe<RelTransform> StaticCache::getData(TimePoint time)
 {
-  data_out = storage_;
-  data_out.stamp_ = time;
-  return true;
+  return Maybe<RelTransform>{storage};
 };
 
-bool StaticCache::insertData(const TransformStorage& new_data)
+void StaticCache::insertData(TimePoint time, RelTransform new_data)
 {
-  storage_ = new_data;
-  return true;
+  storage = new_data;
 };
 
-
-
-
-void StaticCache::clearList() { return; };
-
-unsigned int StaticCache::getListLength() {   return 1; };
-
-CompactFrameID StaticCache::getParent(TimePoint time, std::string* error_str)
-{
-  return storage_.frame_id_;
-}
-
-P_TimeAndFrameID StaticCache::getLatestTimeAndParent()
-{
-  return std::make_pair(TimePoint(), storage_.frame_id_);
-}
-
-TimePoint StaticCache::getLatestTimestamp()
-{   
-  return TimePoint();
-};
-
-TimePoint StaticCache::getOldestTimestamp()
-{   
-  return TimePoint();
-};
+void StaticCache::reset() { };

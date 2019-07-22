@@ -32,138 +32,80 @@
 #ifndef TF2_TIME_CACHE_H
 #define TF2_TIME_CACHE_H
 
+#include "buffer_core.h"
+#include "exceptions.h"
 #include "transform_storage.h"
 
-#include <memory>
 #include <list>
+#include <memory>
 #include <sstream>
 
-#include <tf2/visibility_control.h>
+#include <deque>
+
+#include "tf2/time_cache_interface.h"
+#include "tf2/visibility_control.h"
 
 namespace tf2
 {
 
-typedef std::pair<TimePoint, CompactFrameID> P_TimeAndFrameID;
+constexpr Duration TIMECACHE_DEFAULT_MAX_STORAGE_TIME = std::chrono::seconds(10); //!< default value of 10 seconds storage
 
-class TimeCacheInterface
-{
-public:
-  /** \brief Access data from the cache */
-  TF2_PUBLIC
-  virtual bool getData(TimePoint time, TransformStorage & data_out, std::string* error_str = 0)=0; //returns false if data unavailable (should be thrown as lookup exception
+/// Represents the transform history of a given frame, whose value may change
+/// smoothly over time. Allows inserting new data, interpolating between
+/// existing data, and purging old data.
+class TimeCache : public TimeCacheInterface {
+  /// Cache entry data type.
+  /// Each cache entry has both a time and the frame's relation to its parent
+  using Storage = std::pair<TimePoint, RelTransform>;
 
-  /** \brief Insert data into the cache */
-  TF2_PUBLIC
-  virtual bool insertData(const TransformStorage& new_data)=0;
+  /// All cache entries. Insertions will happen mostly at or near one end and
+  /// purges at the other, so a deque gives good performance
+  std::deque<Storage> storage;
 
-  /** @brief Clear the list of stored values */
-  TF2_PUBLIC
-  virtual void clearList()=0;
+  decltype(TimeCache::storage)::iterator getInsertionIt(TimePoint time){
+    // binary search for the location where
+    auto result = std::upper_bound(storage.begin(),storage.end(), time,
+        [](TimePoint t, Storage t2) -> bool {return t < t2.first; });
 
-  /** \brief Retrieve the parent at a specific time */
-  TF2_PUBLIC
-  virtual CompactFrameID getParent(TimePoint time, std::string* error_str) = 0;
-
-  /**
-   * \brief Get the latest time stored in this cache, and the parent associated with it.  Returns parent = 0 if no data.
-   */
-  TF2_PUBLIC
-  virtual P_TimeAndFrameID getLatestTimeAndParent() = 0;
-
-
-  /// Debugging information methods
-  /** @brief Get the length of the stored list */
-  TF2_PUBLIC
-  virtual unsigned int getListLength()=0;
-
-  /** @brief Get the latest timestamp cached */
-  TF2_PUBLIC
-  virtual TimePoint getLatestTimestamp()=0;
-
-  /** @brief Get the oldest timestamp cached */
-  TF2_PUBLIC
-  virtual TimePoint getOldestTimestamp()=0;
-};
-
-using TimeCacheInterfacePtr = std::shared_ptr<TimeCacheInterface>;
-
-constexpr tf2::Duration TIMECACHE_DEFAULT_MAX_STORAGE_TIME = std::chrono::seconds(10); //!< default value of 10 seconds storage
-
-/** \brief A class to keep a sorted linked list in time
- * This builds and maintains a list of timestamped
- * data.  And provides lookup functions to get
- * data out as a function of time. */
-class TimeCache : public TimeCacheInterface
-{
- public:
-  TF2_PUBLIC
-  static const int MIN_INTERPOLATION_DISTANCE = 5; //!< Number of nano-seconds to not interpolate below.
-  TF2_PUBLIC
-  static const unsigned int MAX_LENGTH_LINKED_LIST = 1000000; //!< Maximum length of linked list, to make sure not to be able to use unlimited memory.
-
-  TF2_PUBLIC
-  TimeCache(tf2::Duration  max_storage_time = TIMECACHE_DEFAULT_MAX_STORAGE_TIME);
-
-
-  /// Virtual methods
-
-  TF2_PUBLIC
-  virtual bool getData(TimePoint time, TransformStorage & data_out, std::string* error_str = 0);
-  TF2_PUBLIC
-  virtual bool insertData(const TransformStorage& new_data);
-  TF2_PUBLIC
-  virtual void clearList();
-  TF2_PUBLIC
-  virtual CompactFrameID getParent(TimePoint time, std::string* error_str);
-  TF2_PUBLIC
-  virtual P_TimeAndFrameID getLatestTimeAndParent();
-
-  /// Debugging information methods
-  TF2_PUBLIC
-  virtual unsigned int getListLength();
-  TF2_PUBLIC
-  virtual TimePoint getLatestTimestamp();
-  TF2_PUBLIC
-  virtual TimePoint getOldestTimestamp();
-  
-
-private:
-  typedef std::list<TransformStorage> L_TransformStorage;
-  L_TransformStorage storage_;
-
+    assert (storage.empty() ||
+        result == storage.end() && storage.back().time < time ||
+        result == storage.begin() && time <= result -> time ||
+        (result-1)->time < time && time <= result->time
+    );
+    return result;
+  }
+  /// Time horizon for purging old cache entries
   tf2::Duration max_storage_time_;
 
+  /// Purge old cache entries, before the time horizon
+  void purge_old();
 
-  /// A helper function for getData
-  //Assumes storage is already locked for it
-  inline uint8_t findClosest(TransformStorage*& one, TransformStorage*& two, TimePoint target_time, std::string* error_str);
+public:
+  TF2_PUBLIC
+  TimeCache(tf2::Duration max_storage_time = TIMECACHE_DEFAULT_MAX_STORAGE_TIME);
 
-  inline void interpolate(const TransformStorage& one, const TransformStorage& two, TimePoint time, TransformStorage& output);
-
-
-  void pruneList();
-
-
-
+  /// Virtual methods
+  TF2_PUBLIC
+  Maybe<RelTransform> getData(TimePoint time) override;
+  TF2_PUBLIC
+  void insertData(TimePoint,RelTransform) override;
+  TF2_PUBLIC
+  virtual void reset();
 };
 
-class StaticCache : public TimeCacheInterface
-{
- public:
+/// Represents the rigid transform of a given frame, whose relative transform
+/// does not change with time.
+/// Inserting new data completely forgets the old value.
+class StaticCache : public TimeCacheInterface {
+  RelTransform storage;
+public:
   /// Virtual methods
-
   TF2_PUBLIC
-  virtual bool getData(TimePoint time, TransformStorage & data_out, std::string* error_str = 0); //returns false if data unavailable (should be thrown as lookup exception
+  Maybe<RelTransform> getData(TimePoint time) override;
   TF2_PUBLIC
-  virtual bool insertData(const TransformStorage& new_data);
+  void insertData(TimePoint time, RelTransform data) override;
   TF2_PUBLIC
-  virtual void clearList();
-  TF2_PUBLIC
-  virtual CompactFrameID getParent(TimePoint time, std::string* error_str);
-  TF2_PUBLIC
-  virtual P_TimeAndFrameID getLatestTimeAndParent();
-
-
+  void reset() override;
   /// Debugging information methods
   TF2_PUBLIC
   virtual unsigned int getListLength();
@@ -171,12 +113,7 @@ class StaticCache : public TimeCacheInterface
   virtual TimePoint getLatestTimestamp();
   TF2_PUBLIC
   virtual TimePoint getOldestTimestamp();
-  
-
-private:
-  TransformStorage  storage_;
 };
-
 }
 
 #endif // TF2_TIME_CACHE_H
