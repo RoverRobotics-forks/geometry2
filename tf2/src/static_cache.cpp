@@ -39,7 +39,7 @@ using namespace tf2;
 
 Maybe<RelTransform> StaticCache::getData(TimePoint time)
 {
-  return Maybe<RelTransform>{storage};
+  return Success<RelTransform>{storage};
 };
 
 void StaticCache::insertData(TimePoint time, RelTransform new_data)

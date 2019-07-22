@@ -70,50 +70,37 @@ enum TransformableResult
 
 static constexpr Duration BUFFER_CORE_DEFAULT_CACHE_TIME = std::chrono::seconds(10);  //!< The default amount of time to cache data in seconds
 
-class BufferCoreIterator {
+/// Given a particular time, walks up the tree
+class BufferIteratorToRoot
+{
   std::shared_ptr<BufferCoreInterface> buffer;
   TimePoint time;
   CompactFrameID frame_id;
 
-  Maybe<TransformData> try_get(){
+public:
+  Maybe<RelTransform> maybe_at(){
     if (frame_id == 0)
-      throw NoParentException(buffer.reverse_lookup(frame_id));
+      return Failure<NoParentException>()
     auto cache = buffer->getFrame(frame_id);
 
     return cache.getData(time);
   }
 
-  Maybe<BufferCoreIterator> up(){
-    return {buffer,time,get_parent()};
+  BufferIteratorToRoot up() const{
+    return {buffer, time, maybe_at()->parent};
   }
 
-  RelTransform operator *(){
-    return try_get().get();
+  TransformData operator *() const{
+    return *maybe_at();
   }
-
-  Maybe<RelTransform> get_parent() {
-    return {operator*().parent;};
-  };
+  RelTransform &at() const{
+    return *maybe_at();
+  }
 };
 
-std::pair<std::vector<RelTransform>, std::shared_ptr<TransformException>> walk_to_root(BufferCoreIterator it) {
-  std::vector<RelTransform> result;
-  std::ordered_set visited;
-  TransformException done_reason;
-  try {
-    while (true){
-      if (!visited.insert(it.get_frame()).second)){
-        return {result,LoopException()};
-      }
-      it = *(it.get_parent());
-    }
-  } except (TransformException &e){
-    return {result, std::make_shared<TransformException>(e)};
-  }
-}
-
 /// walk up the tree until we meet a common frame
-Maybe<CompactFrameID> find_common_root(BufferCoreIterator it_target, BufferCoreIterator it_source)
+Maybe<CompactFrameID> find_common_root(
+  BufferIteratorToRoot it_target, BufferIteratorToRoot it_source)
 {
   std::unordered_set<CompactFrameID> visited_target;
   std::shared_ptr<TransformException> target_chain_end;
@@ -124,28 +111,29 @@ Maybe<CompactFrameID> find_common_root(BufferCoreIterator it_target, BufferCoreI
   while (true) {
     if (!target_chain_end) {
       if (!visited_target.insert(it_target.frame_id)) {
-        target_chain_end = std::make_shared<LoopException>();
+        return Failure<LoopException>();
       }
       if (visited_source.count(it_target.frame_id)) {
-        return {it_target.frame_id};
+        return Success<CompactFrameID>(it_target.frame_id);
       }
     }
     if (!source_chain_end) {
       if (!visited_source.insert(it_source.frame_id)) {
-        source_chain_end = std::make_shared<LoopException>();
+        return Failure<LoopException>();
       }
       source_chain.push_back(*it_target);
       if (visited_target.count(it_source.frame_id)) {
-        return { it_source.frame_id};
+        return Success<CompactFrameID>(it_source.frame_id);
       }
     }
     if (target_chain_end && source_chain_end) {
-      return {ConnectivityException};
+      return Failure<ConnectivityException>();
     }
   }
 }
 
-tf2::Transform compute_transform (BufferCoreIterator it_target, BufferCoreIterator it_source, CompactFrameID common_root) {
+tf2::Transform compute_transform (
+  BufferIteratorToRoot it_target, BufferIteratorToRoot it_source, CompactFrameID common_root) {
   auto transform = Identity ();
 
 }
@@ -171,7 +159,7 @@ tf2::Transform compute_transform (BufferCoreIterator it_target, BufferCoreIterat
 class BufferCore : public BufferCoreInterface
 {
   TF2_PUBLIC
-  virtual iterator getIteratorFromFrame(const std::string& a_frame, const tf2::TimePoint & time);
+  virtual iterator walkToRoot(const std::string& a_frame, const tf2::TimePoint & time);
 
 public:
   /************* Constants ***********************/
@@ -196,11 +184,11 @@ public:
   /** \brief Add transform information to the tf data structure
    * \param transform The transform to store
    * \param authority The source of the information for this transform
-   * \param is_static Record this transform as a static transform.  It will be good across all time.  (This cannot be changed after the first call.)
-   * \return True unless an error occured
+   * \param is_static Record this transform as a static transform.  It will be good across all time. (This cannot be changed after the first call.)
    */
   TF2_PUBLIC
-  bool setTransform(const geometry_msgs::msg::TransformStamped& transform, const std::string & authority, bool is_static = false);
+  Maybe<void> setTransform(const geometry_msgs::msg::TransformStamped& transform, const std::string & authority, bool is_static = false);
+
 
   /*********** Accessors *************/
 
@@ -352,7 +340,7 @@ public:
   // Get the state of using_dedicated_thread_
   TF2_PUBLIC
   bool isUsingDedicatedThread() const { return using_dedicated_thread_;};
-  
+
 
 
   /* Backwards compatability section for tf::Transformer you should not use these
@@ -452,7 +440,7 @@ private:
 
   /************************* Internal Functions ****************************/
 
-  bool setTransformImpl(const tf2::Transform& transform_in, const std::string frame_id,
+  Maybe<void> setTransformImpl(const tf2::Transform& transform_in, const std::string frame_id,
                         const std::string child_frame_id, const TimePoint stamp,
                         const std::string& authority, bool is_static);
   void lookupTransformImpl(const std::string& target_frame, const std::string& source_frame,
@@ -475,10 +463,9 @@ private:
   bool warnFrameId(const char* function_name_arg, const std::string& frame_id) const;
   CompactFrameID validateFrameId(const char* function_name_arg, const std::string& frame_id) const;
 
-  tf2::Maybe<TimePoint> lookupFrameNumber2(const std::string & frameid_str) const;
-  TimePoint lookupOrInsertFrameNumber2(const std::string & frameid_str) const;
-
-  /// String to number for frame lookup with dynamic allocation of new frames
+  /// String to number for frame lookup.
+  /// @return the frame ID corresponding to the given frame id
+  /// @throw LookupError if the frame ID does not exist
   CompactFrameID lookupFrameNumber(const std::string& frameid_str) const;
 
   /// String to number for frame lookup with dynamic allocation of new frames
@@ -486,8 +473,6 @@ private:
 
   /// Number to string frame lookup may throw LookupException if number invalid
   const std::string& lookupFrameString(CompactFrameID frame_id_num) const;
-
-  void createConnectivityErrorString(CompactFrameID source_frame, CompactFrameID target_frame, std::string* out) const;
 
   /**@brief Return the latest rostime which is common across the spanning set */
   tf2::Maybe<TimePoint> getLatestCommonTime(CompactFrameID target_frame, CompactFrameID source_frame) const

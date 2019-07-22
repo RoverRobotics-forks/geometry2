@@ -121,11 +121,6 @@ void setIdentity(geometry_msgs::msg::Transform& tx)
   tx.rotation.w = 1;
 }
 
-bool startsWithSlash(const std::string& frame_id)
-{
-  return (!frame_id.empty() && frame_id[0] == '/');
-}
-
 std::string stripSlash(const std::string& in)
 {
   auto c = in.begin();

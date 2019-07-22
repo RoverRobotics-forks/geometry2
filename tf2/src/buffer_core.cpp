@@ -32,9 +32,10 @@
 #include "tf2/buffer_core.h"
 #include "tf2/time_cache.h"
 #include "tf2/exceptions.h"
+#include "tf2/utils.h"
 
 #include "tf2/LinearMath/Transform.h"
-#include <assert.h>
+#include <cassert>
 #include <console_bridge/console.h>
 #include <unordered_set>
 
@@ -43,18 +44,10 @@ namespace tf2
 
 bool BufferCore::warnFrameId(const char* function_name_arg, const std::string& frame_id) const
 {
-  if (frame_id.size() == 0)
+  if (frame_id.empty())
   {
     std::stringstream ss;
     ss << "Invalid argument passed to "<< function_name_arg <<" in tf2 frame_ids cannot be empty";
-    CONSOLE_BRIDGE_logWarn("%s",ss.str().c_str());
-    return true;
-  }
-
-  if (startsWithSlash(frame_id))
-  {
-    std::stringstream ss;
-    ss << "Invalid argument \"" << frame_id << "\" passed to "<< function_name_arg <<" in tf2 frame_ids cannot start with a '/' like: ";
     CONSOLE_BRIDGE_logWarn("%s",ss.str().c_str());
     return true;
   }
@@ -71,12 +64,6 @@ CompactFrameID BufferCore::validateFrameId(const char* function_name_arg, const 
     throw tf2::InvalidArgumentException(ss.str().c_str());
   }
 
-  if (startsWithSlash(frame_id))
-  {
-    std::stringstream ss;
-    ss << "Invalid argument \"" << frame_id << "\" passed to "<< function_name_arg <<" in tf2 frame_ids cannot start with a '/' like: ";
-    throw tf2::InvalidArgumentException(ss.str().c_str());
-  }
 
   CompactFrameID id = lookupFrameNumber(frame_id);
   if (id == 0)
@@ -113,7 +100,7 @@ void BufferCore::clear()
   }
 }
 
-bool BufferCore::setTransform(const geometry_msgs::msg::TransformStamped& transform, const std::string & authority, bool is_static)
+Maybe<void> BufferCore::setTransform(const geometry_msgs::msg::TransformStamped& transform, const std::string & authority, bool is_static)
 {
   tf2::Transform tf2_transform(tf2::Quaternion(transform.transform.rotation.x,
                                                transform.transform.rotation.y,
@@ -127,45 +114,38 @@ bool BufferCore::setTransform(const geometry_msgs::msg::TransformStamped& transf
   return setTransformImpl(tf2_transform, transform.header.frame_id, transform.child_frame_id,
                           time_point, authority, is_static);
 }
-
-Maybe<void> foo(){
-
-}
-bool BufferCore::setTransformImpl(const tf2::Transform& transform_in, const std::string frame_id,
+Maybe<void> BufferCore::setTransformImpl(const tf2::Transform& transform_in, const std::string frame_id,
                                   const std::string child_frame_id, const TimePoint stamp,
                                   const std::string& authority, bool is_static)
 {
   std::string stripped_frame_id = stripSlash(frame_id);
   std::string stripped_child_frame_id = stripSlash(child_frame_id);
 
-  bool error_exists = false;
+  std::vector<std::string> validation_failures;
   if (stripped_child_frame_id == stripped_frame_id)
   {
-    CONSOLE_BRIDGE_logError("TF_SELF_TRANSFORM: Ignoring transform from authority \"%s\" with frame_id and child_frame_id  \"%s\" because they are the same",  authority.c_str(), stripped_child_frame_id.c_str());
-    error_exists = true;
+    validation_failures.emplace_back("Transform has the same child and parent frame ID");
   }
 
-  if (stripped_child_frame_id == "")
+  if (stripped_child_frame_id.empty())
   {
-    CONSOLE_BRIDGE_logError("TF_NO_CHILD_FRAME_ID: Ignoring transform from authority \"%s\" because child_frame_id not set ", authority.c_str());
-    error_exists = true;
+    validation_failures.emplace_back("No child frame ID");
   }
 
-  if (stripped_frame_id == "")
+  if (stripped_frame_id.empty())
   {
-    CONSOLE_BRIDGE_logError("TF_NO_FRAME_ID: Ignoring transform with child_frame_id \"%s\"  from authority \"%s\" because frame_id not set", stripped_child_frame_id.c_str(), authority.c_str());
-    error_exists = true;
+    validation_failures.emplace_back("No parent frame ID");
   }
 
   if (std::isnan(transform_in.getOrigin().x()) || std::isnan(transform_in.getOrigin().y()) || std::isnan(transform_in.getOrigin().z())||
       std::isnan(transform_in.getRotation().x()) || std::isnan(transform_in.getRotation().y()) || std::isnan(transform_in.getRotation().z()) || std::isnan(transform_in.getRotation().w()))
   {
+    validation_failures.emplace_back("Transform contains NANs");
     CONSOLE_BRIDGE_logError("TF_NAN_INPUT: Ignoring transform for child_frame_id \"%s\" from authority \"%s\" because of a nan value in the transform (%f %f %f) (%f %f %f %f)",
              stripped_child_frame_id.c_str(), authority.c_str(),
              transform_in.getOrigin().x(), transform_in.getOrigin().y(), transform_in.getOrigin().z(),
              transform_in.getRotation().x(), transform_in.getRotation().y(), transform_in.getRotation().z(), transform_in.getRotation().w()
               );
-    error_exists = true;
   }
 
   bool valid = std::abs((transform_in.getRotation().w() * transform_in.getRotation().w()
@@ -175,14 +155,21 @@ bool BufferCore::setTransformImpl(const tf2::Transform& transform_in, const std:
 
   if (!valid)
   {
+    validation_failures.emplace_back("Transform contains non-normalized quaternion");
     CONSOLE_BRIDGE_logError("TF_DENORMALIZED_QUATERNION: Ignoring transform for child_frame_id \"%s\" from authority \"%s\" because of an invalid quaternion in the transform (%f %f %f %f)",
              stripped_child_frame_id.c_str(), authority.c_str(),
              transform_in.getRotation().x(), transform_in.getRotation().y(), transform_in.getRotation().z(), transform_in.getRotation().w());
-    error_exists = true;
   }
 
-  if (error_exists)
-    return false;
+
+  if (!validation_failures.empty()) {
+    std::string failure_reason = "Invalid transform:";
+    for (auto &e : validation_failures) {
+      failure_reason += " " ;
+      failure_reason += e;
+    }
+    return Failure(TransformException(failure_reason));
+  }
 
   {
     std::unique_lock<std::mutex> lock(frame_mutex_);
@@ -494,7 +481,6 @@ void BufferCore::lookupTransformImpl(
   transform.setRotation(accum.result_quat);
 }
 
-
 void BufferCore::lookupTransformImpl(const std::string& target_frame,
                                                         const TimePoint& target_time,
                                                         const std::string& source_frame,
@@ -558,8 +544,8 @@ bool BufferCore::canTransform(const std::string& target_frame, const std::string
 
   std::unique_lock<std::mutex> lock(frame_mutex_);
 
-  CompactFrameID target_id = lookupFrameNumber(target_frame);
-  CompactFrameID source_id = lookupFrameNumber(source_frame);
+  CompactFrameID target_id = *lookupFrameNumber(target_frame);
+  CompactFrameID source_id = *lookupFrameNumber(source_frame);
 
   return canTransformNoLock(target_id, source_id, time, error_msg);
 }
@@ -578,69 +564,52 @@ bool BufferCore::canTransform(const std::string& target_frame, const TimePoint& 
   return canTransform(target_frame, fixed_frame, target_time) && canTransform(fixed_frame, source_frame, source_time, error_msg);
 }
 
-TimeCacheInterface::Ptr BufferCore::getFrame(CompactFrameID frame_id) const
+Maybe<TimeCacheInterface::Ptr> BufferCore::getFrame(CompactFrameID frame_id) const
 {
   if (frame_id >= frames_.size()){
-    return Maybe<TimeCacheInterface::Ptr>{std::make_shared<LookupException>("<unknown frame>")};
+    return Failure(LookupException("<unknown frame>"));
   }
   else
   {
-    return {frames_[frame_id]};
+    return Success<TimeCacheInterface::Ptr>(frames_[frame_id]);
   }
 }
 
-Maybe<CompactFrameID> BufferCore::lookupFrameNumber(const std::string& frameid_str) const
+CompactFrameID BufferCore::lookupFrameNumber(const std::string& frameid_str) const
 {
-  CompactFrameID retval;
-
   auto map_it = frameIDs_.find(frameid_str);
   if (map_it == frameIDs_.end())
   {
-    return {LookupException(frameid_str)};
+    throw LookupException(frameid_str);
   }
   else {
-    return {map_it->second};
+    return map_it->second;
   }
 }
 
-CompactFrameID BufferCore::lookupOrInsertFrameNumber(const std::string& frameid_str)
-{
-  CompactFrameID retval = 0;
-  auto map_it = frameIDs_.find(frameid_str);
-  if (map_it == frameIDs_.end())
-  {
-    retval = CompactFrameID(frames_.size());
-    frames_.push_back(TimeCacheInterface::Ptr());//Just a place holder for iteration
-    frameIDs_[frameid_str] = retval;
+CompactFrameID BufferCore::lookupOrInsertFrameNumber(const std::string& frameid_str) {
+  if (frameid_str.empty())
+    throw EmptyFrameNameError();
+
+  try {
+    return lookupFrameNumber(frameid_str);
+  }
+  catch (LookupException &) {
+    auto new_frame_id = CompactFrameID(frames_.size());
+    frames_.emplace_back(nullptr);  // Just a place holder for iteration
+    frameIDs_[frameid_str] = new_frame_id;
     frameIDs_reverse.push_back(frameid_str);
   }
-  else
-    retval = frameIDs_[frameid_str];
-
-  return retval;
 }
 
 const std::string& BufferCore::lookupFrameString(CompactFrameID frame_id_num) const
 {
     if (frame_id_num >= frameIDs_reverse.size())
     {
-      std::stringstream ss;
-      ss << "Reverse lookup of frame id " << frame_id_num << " failed!";
-      throw tf2::LookupException(ss.str());
+      throw tf2::LookupException(frame_id_num);
     }
     else
       return frameIDs_reverse[frame_id_num];
-}
-
-void BufferCore::createConnectivityErrorString(CompactFrameID source_frame, CompactFrameID target_frame, std::string* out) const
-{
-  if (!out)
-  {
-    return;
-  }
-  *out = std::string("Could not find a connection between '"+lookupFrameString(target_frame)+"' and '"+
-                     lookupFrameString(source_frame)+"' because they are not part of the same tree."+
-                     "Tf has two or more unconnected trees.");
 }
 
 std::vector<std::string> BufferCore::getAllFrameNames() const

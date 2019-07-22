@@ -36,9 +36,11 @@
 #include <cstdint>
 
 #include <tf2/visibility_control.h>
+#include <memory>
 #include <sstream>
-#include <vector>
 #include <stdexcept>
+#include <vector>
+#include "transform_storage.h"
 namespace tf2{
 
 enum class TF2Error : std::uint8_t {
@@ -70,47 +72,87 @@ public:
 };
 
 template <typename T>
-class Maybe final {
-  bool is_result;
-  union {
-    const T result;
-    const std::shared_ptr<TransformException> exception;
-  } content;
+struct Success {
+  const std::shared_ptr<T> result;
 
-  Maybe(bool is_result, decltype(content) content): is_result(is_result),content(content){}
-
-public:
-  auto operator *(){
-    return get();
+  template <typename ... Args>
+  explicit Success(Args&&... args) {
+    result = std::make_shared<T>(std::forward<Args>>(args)...);
   }
-  auto get() {
-    if (!is_result)
-      return content.result;
-    else
-      throw *(content.exception);
-  }
-  auto is_success() {return !bool(is_result);}
-  std::reference_wrapper<TransformException> exc_ref(){
-    assert (exception);
-    return content.exception.get();
-  };
-  std::shared_ptr<TransformException> get_exception(){return exception;}
-
-  template<typename... Args>
-  static Maybe success(Args&&... args) {
-    return Maybe(true, std::forward<Args>(args)...);
-  }
-
-  template<typename Exc, typename... Args>
-  static Maybe failure(Args&&... args) {
-    return Maybe(false, std::make_shared<Exc>(std::forward<Args>(args)...));
-  }
-
-  template<typename E, typename... Args>
-  explicit Maybe (Args&&... args):result(nullptr), exception(new E(std::forward<Args>(args)...)){};
+};
+template <>
+struct Success<void>{
+  Success() = default;
 };
 
+struct Failure {
+  std::shared_ptr<TransformException> exception;
 
+  template <typename E>
+  explicit Failure(E &&e){
+    static_assert(std::is_base_of<E,TransformException>::value, "E must be a subtype of TransformException");
+    exception = std::make_shared<E>(std::forward(e));
+  }
+  template <typename E, typename ... Args>
+  explicit Failure(Args&&... args) {
+    static_assert(std::is_base_of<E,TransformException>::value, "E must be a subtype of TransformException");
+    exception = std::make_shared<E>(std::forward<Args>>(args)...);
+  }
+};
+
+template <typename T>
+/** @brief a wrapper around the result of a tf2 operator that may fail */
+class Maybe {
+  std::shared_ptr<T> result;
+  std::shared_ptr<TransformException> exception;
+  Maybe (std::shared_ptr<T> &&result, std::shared_ptr<TransformException> &&exception) : result(result), exception(exception){
+    assert (result ^ exception);
+  }
+public:
+  Maybe(Success<T> s) : Maybe(s.result, nullptr){}; // NOLINT(google-explicit-constructor,hicpp-explicit-conversions)
+  Maybe(Failure f) : Maybe(nullptr, f.exception){}; // NOLINT(google-explicit-constructor,hicpp-explicit-conversions)
+
+  auto operator *(){
+    if (result)
+      return *result;
+    else
+      throw *exception;
+  }
+  auto is_success() {return !bool(exception);}
+
+  T & get_result() {
+    assert (result);
+    return *result;
+  }
+  TransformException & get_exception() {
+    assert (exception);
+    return *exception;
+  }
+};
+
+template<>
+class Maybe<void> final{
+  std::shared_ptr<TransformException> exception;
+public:
+  Maybe(Success<void> s) : exception(nullptr){}; // NOLINT(google-explicit-constructor,hicpp-explicit-conversions)
+  Maybe(Failure f) : exception(f.exception){}; // NOLINT(google-explicit-constructor,hicpp-explicit-conversions)
+
+  void operator *(){
+    if (exception)
+      throw *exception;
+  }
+  auto is_success() {return !bool(exception);}
+
+  TransformException & get_exception() {
+    assert (exception);
+    return *exception;
+  }
+};
+
+class EmptyFrameNameError: public TransformException{
+public:
+  EmptyFrameNameError(): TransformException("Frame has an empty name") {};
+};
 
   /** \brief An exception class to notify of no connection
    * 
@@ -171,6 +213,9 @@ public:
 
   TF2_PUBLIC
   LookupException(const std::string frame, const std::string frame2) : tf2::TransformException("Frames do not exist: "+frame + ", "+ frame) { };
+
+  TF2_PUBLIC
+  LookupException(CompactFrameID frame_id): tf2::TransformException("Could not find name for frame: " + std::to_string(frame_id)) {  };
 };
 
   /** \brief An exception class to notify that the requested value would have required extrapolation beyond current limits.
